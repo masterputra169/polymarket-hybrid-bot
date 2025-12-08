@@ -1,0 +1,95 @@
+# ==========================================
+# CRITICAL: Sensitive Data - NEVER COMMIT!
+# ==========================================
+
+# Environment variables (CONTAINS PRIVATE KEYS!)
+.env
+.env.*
+!.env.example
+
+# Private keys
+*.key
+*.pem
+
+# Wallet files
+wallet.json
+keystore/
+
+# ==========================================
+# Python
+# ==========================================
+
+# Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# ==========================================
+# Project Specific
+# ==========================================
+
+# Logs
+logs/
+*.log
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+trades.db
+
+# Reports & Charts
+reports/
+charts/
+*.png
+*.jpg
+*.pdf
+
+# Test files
+test_*.py
+debug_*.py
+scratch.py
+
+# Temporary files
+temp/
+tmp/
+*.tmp
+*.bak
+
+# ==========================================
+# IDE
+# ==========================================
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# PyCharm
+.idea/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# ==========================================
+# OS
+# ==========================================
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*~

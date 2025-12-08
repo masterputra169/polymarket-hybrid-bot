@@ -1,0 +1,25 @@
+# Core Polymarket
+py-clob-client>=0.30.0
+
+# Web3 for allowances (REQUIRED)
+web3>=6.14.0
+
+# Async & WebSocket (for last-second sniping)
+asyncio>=3.4.3
+aiohttp>=3.9.0
+websockets>=12.0
+
+# Configuration & Environment
+python-dotenv>=1.0.0
+
+# HTTP Requests
+requests>=2.31.0
+
+# Data Processing
+numpy>=1.24.0
+
+# Visualization
+matplotlib>=3.7.0
+
+# Optional: Enhanced logging
+colorama>=0.4.6
