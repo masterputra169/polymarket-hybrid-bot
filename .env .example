@@ -1,0 +1,233 @@
+# ═══════════════════════════════════════════════════════════════
+# POLYMARKET HYBRID TRADING BOT - CONFIGURATION
+# ═══════════════════════════════════════════════════════════════
+#
+# 📝 INSTRUCTIONS:
+# 1. Copy this file to .env (remove .template)
+# 2. Fill in your PRIVATE_KEY and PROXY_ADDRESS
+# 3. Adjust trading parameters as needed
+# 4. Keep DRY_RUN=true until you're ready to trade real money
+#
+# ⚠️  SECURITY WARNING:
+# - Never share this file or commit it to Git
+# - Your PRIVATE_KEY controls your wallet - keep it secret!
+# - Use a dedicated trading wallet with limited funds
+#
+# ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════
+# 🔐 WALLET CONFIGURATION (REQUIRED)
+# ═══════════════════════════════════════════════════════════════
+
+# Your wallet private key (WITHOUT 0x prefix)
+# Get from: Polymarket → Profile → Cash → Export Private Key
+# Example: abc123def456789... (64 characters, no 0x)
+PRIVATE_KEY=
+
+# Your Polymarket proxy wallet address (WITH 0x prefix)
+# Get from: Your Polymarket profile page (address under your name)
+# Example: 0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb5
+PROXY_ADDRESS=
+
+# Blockchain settings (DON'T CHANGE unless you know what you're doing)
+CHAIN_ID=137
+SIGNATURE_TYPE=2
+
+
+# ═══════════════════════════════════════════════════════════════
+# 💰 STRATEGY 1: PAIR TRADING (gabagool22's approach)
+# Active during: 0-14 minutes of market
+# ═══════════════════════════════════════════════════════════════
+
+# Maximum pair cost to enter trade (YES avg + NO avg must be below this)
+# Lower = safer but fewer opportunities
+# Range: 0.90 - 0.99 | Recommended: 0.98
+TARGET_PAIR_COST=0.98
+
+# Size of each individual order in USD
+# Bot places multiple small orders for better price averaging
+# Range: 0.50 - 1.00 | Recommended: 0.75
+ORDER_SIZE_USD=0.75
+
+# Minimum single order size (safety limit)
+MIN_ORDER_SIZE=0.50
+
+# Maximum single order size (safety limit)
+MAX_ORDER_SIZE=1.00
+
+# Maximum total to spend on each side (YES or NO)
+# Total exposure = MAX_PER_SIDE × 2
+# Conservative: 5.0 ($10 total) | Moderate: 10.0 ($20 total) | Aggressive: 20.0 ($40 total)
+MAX_PER_SIDE=5.0
+
+# Maximum imbalance between YES and NO positions
+# Keeps positions balanced (0.20 = max 20% difference)
+# Range: 0.10 - 0.30 | Recommended: 0.20
+MAX_IMBALANCE=0.20
+
+# How often to check prices (in seconds)
+# Lower = faster response but more API calls
+# Range: 3 - 10 | Recommended: 5
+POLLING_INTERVAL=5
+
+# Maximum daily loss before stopping trading
+# Safety feature to prevent large losses
+# Recommended: 50.0 - 100.0
+MAX_DAILY_LOSS=50.0
+
+
+# ═══════════════════════════════════════════════════════════════
+# 🎯 STRATEGY 2: LAST-SECOND SNIPING
+# Active during: Final 60 seconds before settlement
+# ═══════════════════════════════════════════════════════════════
+
+# When to activate sniping mode (seconds before market closes)
+# Recommended: 60 (1 minute before settlement)
+SNIPE_TRIGGER_SECONDS=60
+
+# Minimum price to consider (prevents buying obviously wrong side)
+# If price < this, skip (probably data error or wrong side)
+# Range: 0.50 - 0.90 | Recommended: 0.90
+SNIPE_MIN_PRICE=0.90
+
+# Maximum price to snipe at
+# Won't buy if price >= this (not enough profit margin)
+# Range: 0.97 - 0.99 | Recommended: 0.99
+SNIPE_MAX_PRICE=0.99
+
+# How much to spend on snipe (in USD)
+# Conservative: 5.0 | Moderate: 10.0 | Aggressive: 20.0
+SNIPE_SIZE_USD=5.0
+
+
+# ═══════════════════════════════════════════════════════════════
+# 🎲 MARKET SELECTION
+# ═══════════════════════════════════════════════════════════════
+
+# Which cryptocurrency to trade
+# Options: BTC, ETH, SOL, XRP
+# BTC and ETH have most frequent markets
+ASSET=BTC
+
+# Market duration to target (in minutes)
+# 15-minute markets are most common
+# Don't change unless you know other durations exist
+MARKET_DURATION=15
+
+
+# ═══════════════════════════════════════════════════════════════
+# 🚦 EXECUTION MODE
+# ═══════════════════════════════════════════════════════════════
+
+# Dry run mode (IMPORTANT FOR TESTING!)
+# true  = Bot simulates trades without spending real money
+# false = Bot executes real trades (USE WITH CAUTION!)
+#
+# ⚠️  ALWAYS test with DRY_RUN=true first!
+# Only set to 'false' after successful dry runs
+DRY_RUN=true
+
+SKIP_ALLOWANCE_CHECK=true
+
+# ═══════════════════════════════════════════════════════════════
+# 📊 MONITORING & VISUALIZATION
+# ═══════════════════════════════════════════════════════════════
+
+# How often to update charts (in seconds)
+# 60 = update every minute
+CHART_UPDATE_INTERVAL=60
+
+# Automatically generate trading charts
+# true = Generate charts during trading
+# false = Skip chart generation (faster but no visuals)
+AUTO_GENERATE_CHART=true
+
+# Logging detail level
+# DEBUG = Very detailed (for troubleshooting)
+# INFO  = Normal detail (recommended)
+# WARNING = Only warnings and errors
+# ERROR = Only errors
+LOG_LEVEL=INFO
+
+
+# ═══════════════════════════════════════════════════════════════
+# 🛡️ SAFETY LIMITS
+# ═══════════════════════════════════════════════════════════════
+
+# Maximum price for YES outcome (in cents)
+# Won't buy YES if price > this
+# Prevents buying overpriced outcomes
+MAX_PRICE_YES=60.0
+
+# Maximum price for NO outcome (in cents)
+# Won't buy NO if price > this
+MAX_PRICE_NO=60.0
+
+# Minimum profit margin to accept (as decimal)
+# 0.02 = 2% minimum profit margin
+MIN_PROFIT_MARGIN=0.02
+
+
+# ═══════════════════════════════════════════════════════════════
+# 🔧 ADVANCED SETTINGS (Don't change unless necessary)
+# ═══════════════════════════════════════════════════════════════
+
+# API request timeout (in seconds)
+API_TIMEOUT=15
+
+# Polymarket CLOB API host (don't change)
+CLOB_HOST=https://clob.polymarket.com
+
+
+# ═══════════════════════════════════════════════════════════════
+# 📝 CONFIGURATION PRESETS
+# ═══════════════════════════════════════════════════════════════
+#
+# Copy one of these presets based on your risk tolerance:
+#
+# 🟢 CONSERVATIVE (Low Risk, Low Volume):
+# TARGET_PAIR_COST=0.95
+# MAX_PER_SIDE=5.0
+# SNIPE_SIZE_USD=5.0
+# SNIPE_MAX_PRICE=0.98
+# DRY_RUN=true
+#
+# 🟡 MODERATE (Balanced, Recommended for beginners):
+# TARGET_PAIR_COST=0.98
+# MAX_PER_SIDE=10.0
+# SNIPE_SIZE_USD=10.0
+# SNIPE_MAX_PRICE=0.99
+# DRY_RUN=true
+#
+# 🔴 AGGRESSIVE (Higher Volume, More Risk):
+# TARGET_PAIR_COST=0.99
+# MAX_PER_SIDE=20.0
+# SNIPE_SIZE_USD=20.0
+# SNIPE_MAX_PRICE=0.99
+# DRY_RUN=false  # Only after testing!
+#
+# 🧪 TESTING (Safe Testing Mode):
+# TARGET_PAIR_COST=0.98
+# MAX_PER_SIDE=1.0
+# SNIPE_SIZE_USD=1.0
+# SNIPE_MAX_PRICE=0.99
+# DRY_RUN=true
+#
+# ═══════════════════════════════════════════════════════════════
+
+
+# ═══════════════════════════════════════════════════════════════
+# ✅ QUICK CHECKLIST BEFORE RUNNING:
+# ═══════════════════════════════════════════════════════════════
+#
+# [ ] PRIVATE_KEY filled in (no 0x prefix)
+# [ ] PROXY_ADDRESS filled in (with 0x prefix)
+# [ ] DRY_RUN=true for first test
+# [ ] MAX_PER_SIDE set to comfortable amount
+# [ ] Ran: python scripts/approve.py
+# [ ] Have USDC in Polymarket wallet
+# [ ] Have MATIC for gas fees
+#
+# Ready to start? Run: python main_hybrid.py
+#
+# ═══════════════════════════════════════════════════════════════

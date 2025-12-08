@@ -1,5 +1,6 @@
 """
-Logging utility for the bot
+Logging utility for the bot - FIXED VERSION
+Added setup_logger() alias for compatibility
 """
 
 import logging
@@ -88,6 +89,19 @@ def get_logger(name: str) -> logging.Logger:
     
     return logger
 
+# Alias for compatibility with main_hybrid.py
+def setup_logger(name: str) -> logging.Logger:
+    """
+    Setup and return a logger (alias for get_logger)
+    
+    Args:
+        name: Logger name (usually __name__)
+        
+    Returns:
+        Configured logger
+    """
+    return get_logger(name)
+
 # Test function
 if __name__ == "__main__":
     logger = get_logger(__name__)
@@ -99,3 +113,7 @@ if __name__ == "__main__":
     logger.critical("This is a critical message")
     
     print(f"\nLog file created: {LOG_FILE}")
+    
+    # Test alias
+    logger2 = setup_logger("TestLogger")
+    logger2.info("Testing setup_logger alias - should work!")
