@@ -1,15 +1,13 @@
 """
-Polymarket Hybrid Trading Bot
-Combines two proven strategies:
-1. Pair Trading (gabagool22) - During market
-2. Last-Second Sniping - Final seconds before settlement
+Polymarket Hybrid Trading Bot - FIXED VERSION
+Uses improved MarketScanner with slug-based discovery
 """
 
 import os
 import sys
 import asyncio
 import signal
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 # Local imports
@@ -21,7 +19,6 @@ from core.monitor import TradeMonitor
 from utils.logger import setup_logger
 from config import Config
 
-# Load environment
 load_dotenv()
 
 
@@ -47,6 +44,7 @@ class HybridTradingBot:
         # State
         self.current_market = None
         self.trading_mode = None  # 'PAIR_TRADING' or 'SNIPING'
+        self.markets_traded = 0
         
         # Setup signal handlers
         signal.signal(signal.SIGINT, self.shutdown_handler)
@@ -66,16 +64,15 @@ class HybridTradingBot:
             )
             self.logger.info("✅ Connected to Polymarket")
             
-            # 2. Check allowances (optional - if user ran approve.py, skip this)
-            skip_allowance_check = os.getenv("SKIP_ALLOWANCE_CHECK", "false").lower() == "true"
+            # 2. Check allowances
+            skip_allowance = os.getenv("SKIP_ALLOWANCE_CHECK", "false").lower() == "true"
             
-            if not skip_allowance_check:
+            if not skip_allowance:
                 self.logger.info("🔐 Checking USDC allowance...")
                 if not self.client.check_allowance():
                     self.logger.warning("⚠️ Could not verify allowance via API")
                     self.logger.info("💡 If you ran 'python scripts/approve.py' successfully:")
                     self.logger.info("   Add to .env: SKIP_ALLOWANCE_CHECK=true")
-                    self.logger.info("   Or just continue - bot will try to trade anyway")
                     
                     response = input("\nContinue anyway? (y/n): ").strip().lower()
                     if response != 'y':
@@ -83,12 +80,18 @@ class HybridTradingBot:
                 else:
                     self.logger.info("✅ Allowance check passed")
             else:
-                self.logger.info("⏭️ Skipping allowance check (SKIP_ALLOWANCE_CHECK=true)")
+                self.logger.info("⏭️ Skipping allowance check")
             
-           # 3. Initialize scanner
-            self.logger.info("🔍 Initializing market scanner...")
-            self.scanner = MarketScanner()
-            self.logger.info("✅ Scanner ready")
+            # 3. Initialize scanner with config params
+            self.logger.info(f"🔍 Initializing market scanner...")
+            self.logger.info(f"   Asset: {self.config.ASSET}")
+            self.logger.info(f"   Duration: {self.config.MARKET_DURATION} minutes")
+            
+            self.scanner = MarketScanner(
+                asset=self.config.ASSET,
+                duration=self.config.MARKET_DURATION
+            )
+            self.logger.info("✅ Scanner ready (slug + events + search)")
             
             # 4. Initialize pair trader
             self.logger.info("💰 Initializing pair trader...")
@@ -126,22 +129,25 @@ class HybridTradingBot:
         banner = f"""
 ╔═══════════════════════════════════════════════════════════════╗
 ║           POLYMARKET HYBRID TRADING BOT                       ║
+║                    FIXED VERSION                              ║
 ║                                                               ║
 ║  Strategy 1: Pair Trading (gabagool22)                       ║
 ║  Strategy 2: Last-Second Sniping                             ║
+║                                                               ║
+║  Scanner: Slug + Events + Markets (3-method discovery)       ║
 ╚═══════════════════════════════════════════════════════════════╝
 
 📊 Configuration:
    Asset:              {self.config.ASSET}
    Duration:           {self.config.MARKET_DURATION} minutes
+   Slug Pattern:       {self.config.ASSET.lower()}-updown-{self.config.MARKET_DURATION}m-{{timestamp}}
    
 💰 Pair Trading Mode (0-14 min):
    Target Pair Cost:   < ${self.config.TARGET_PAIR_COST}
    Order Size:         ${self.config.ORDER_SIZE_USD}
    Max Per Side:       ${self.config.MAX_PER_SIDE}
    
-🎯 Sniping Mode (Last 60s):
-   Trigger Time:       {self.config.SNIPE_TRIGGER_SECONDS}s before settlement
+🎯 Sniping Mode (Last {self.config.SNIPE_TRIGGER_SECONDS}s):
    Min Price:          ${self.config.SNIPE_MIN_PRICE}
    Max Price:          ${self.config.SNIPE_MAX_PRICE}
    Snipe Size:         ${self.config.SNIPE_SIZE_USD}
@@ -166,6 +172,8 @@ class HybridTradingBot:
         self.logger.info("🏁 Bot started - scanning for markets...")
         
         check_count = 0
+        consecutive_failures = 0
+        max_failures = 10
         
         try:
             while self.running:
@@ -174,35 +182,62 @@ class HybridTradingBot:
                 
                 # 1. Find or update current market
                 if not self.current_market:
-                    self.logger.info(f"[{now}] Check #{check_count}: Scanning for active market...")
+                    self.logger.info(f"[{now}] Check #{check_count}: Scanning for {self.config.ASSET} {self.config.MARKET_DURATION}min market...")
                     
-                    market = await self.scanner.find_active_market_async()
+                    try:
+                        market = await self.scanner.find_active_market_async()
+                        consecutive_failures = 0
+                    except Exception as e:
+                        self.logger.error(f"Scanner error: {e}")
+                        consecutive_failures += 1
+                        
+                        if consecutive_failures >= max_failures:
+                            self.logger.error(f"❌ Too many consecutive failures, stopping")
+                            break
+                        
+                        await asyncio.sleep(30)
+                        continue
                     
                     if market:
                         self.current_market = market
-                        self.logger.info(f"🎯 MARKET FOUND!")
-                        self.logger.info(f"   {market['title']}")
-                        self.logger.info(f"   End Time: {market['end_time']}")
-                        self.logger.info(f"   Outcomes: {market['outcomes']}")
+                        self.markets_traded += 1
+                        
+                        self.logger.info(f"🎯 MARKET #{self.markets_traded} FOUND!")
+                        self.logger.info(f"   {market['question'][:70]}")
+                        self.logger.info(f"   Slug: {market.get('slug', 'N/A')}")
+                        self.logger.info(f"   End Time: {market.get('end_time', 'N/A')}")
+                        self.logger.info(f"   YES: ${market['yes_price']:.4f}")
+                        self.logger.info(f"   NO: ${market['no_price']:.4f}")
+                        
+                        pair_cost = market['yes_price'] + market['no_price']
+                        self.logger.info(f"   Pair Cost: ${pair_cost:.4f}")
                         
                         # Set up traders
                         self.pair_trader.set_market(market)
                         await self.sniper.set_market(market)
                         self.monitor.start_monitoring(market)
                     else:
-                        self.logger.info(f"   ⏳ No active market, retrying in 30s...")
-                        await asyncio.sleep(30)
+                        wait_time = 30
+                        self.logger.info(f"   ⏳ No active market, retrying in {wait_time}s...")
+                        self.logger.info(f"   💡 Markets may only be available during certain hours")
+                        await asyncio.sleep(wait_time)
                         continue
                 
                 # 2. Check time remaining and switch modes
                 time_remaining = self._get_time_remaining()
                 
-                if time_remaining is None:
+                if time_remaining is None or time_remaining <= 0:
                     # Market ended
                     self.logger.info("📊 Market settled - generating report...")
                     self.monitor.generate_final_report()
+                    
+                    # Reset for next market
                     self.current_market = None
                     self.trading_mode = None
+                    
+                    # Brief pause before scanning for next market
+                    self.logger.info("⏳ Waiting 10s before scanning for next market...")
+                    await asyncio.sleep(10)
                     continue
                 
                 # 3. Determine trading mode
@@ -243,19 +278,30 @@ class HybridTradingBot:
     def _get_time_remaining(self) -> int:
         """
         Get seconds remaining until market settlement
-        Returns None if market ended
+        Returns None if market ended or no end time
         """
         if not self.current_market:
             return None
         
         end_time_str = self.current_market.get('end_time')
+        
         if not end_time_str:
-            return None
+            # No end time available, estimate based on typical 15min duration
+            self.logger.debug("No end_time in market data, using fallback")
+            return 600  # Default to 10 minutes
         
         try:
-            # Parse end time (ISO format)
-            end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
-            now = datetime.now(end_time.tzinfo)
+            # Parse end time (handle various ISO formats)
+            if end_time_str.endswith('Z'):
+                end_time_str = end_time_str[:-1] + '+00:00'
+            
+            end_time = datetime.fromisoformat(end_time_str)
+            
+            # Make sure we have timezone-aware datetime
+            if end_time.tzinfo is None:
+                end_time = end_time.replace(tzinfo=timezone.utc)
+            
+            now = datetime.now(timezone.utc)
             
             remaining = (end_time - now).total_seconds()
             
@@ -263,7 +309,7 @@ class HybridTradingBot:
             
         except Exception as e:
             self.logger.error(f"Error calculating time remaining: {e}")
-            return None
+            return 600  # Fallback
     
     def shutdown_handler(self, signum, frame):
         """Handle shutdown signals"""
@@ -274,7 +320,7 @@ class HybridTradingBot:
         """Clean shutdown"""
         self.logger.info("\n📊 Shutting down...")
         
-        if self.monitor:
+        if self.monitor and self.current_market:
             self.logger.info("📈 Generating final report...")
             self.monitor.generate_final_report()
         
@@ -286,11 +332,17 @@ class HybridTradingBot:
             self.logger.info("🎯 Closing sniper connections...")
             await self.sniper.cleanup()
         
+        self.logger.info(f"\n📊 Session Summary:")
+        self.logger.info(f"   Markets Traded: {self.markets_traded}")
         self.logger.info("✅ Shutdown complete. Goodbye! 👋\n")
 
 
 def main():
     """Entry point"""
+    
+    print("\n" + "="*60)
+    print("🚀 POLYMARKET HYBRID BOT - FIXED VERSION")
+    print("="*60 + "\n")
     
     # Check required env vars
     required_vars = ['PRIVATE_KEY', 'PROXY_ADDRESS']
@@ -298,7 +350,9 @@ def main():
     
     if missing:
         print(f"❌ Missing required environment variables: {', '.join(missing)}")
-        print("💡 Please create a .env file with required configuration")
+        print("\n💡 Please create a .env file with:")
+        print("   PRIVATE_KEY=your_private_key_without_0x")
+        print("   PROXY_ADDRESS=0xYourPolymarketWallet")
         sys.exit(1)
     
     # Create and run bot
@@ -310,8 +364,12 @@ def main():
         # Run async event loop
         asyncio.run(bot.run())
         
+    except KeyboardInterrupt:
+        print("\n⚠️ Stopped by user")
     except Exception as e:
         print(f"❌ Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 
