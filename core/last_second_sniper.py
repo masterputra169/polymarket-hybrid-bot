@@ -1,18 +1,5 @@
 """
-Last-Second Sniper Module - FIXED VERSION
-Snipes winning outcome in final seconds before settlement
-
-Strategy:
-- Wait until < 60s before market closes
-- Monitor real-time prices via REST API (WebSocket optional)
-- Identify winning side (price > 0.50)
-- Buy if available < $0.99
-- Near-zero risk (guaranteed $1.00 settlement)
-
-FIXES:
-- Removed broken WebSocket implementation
-- Uses REST API polling for price updates (more reliable)
-- Proper async/await throughout
+Last-Second Sniper V2 - Uses CLOB Orderbook for Real Prices
 """
 import asyncio
 import aiohttp
@@ -22,33 +9,22 @@ from typing import Optional, Dict
 
 class LastSecondSniper:
     """
-    Last-second sniping strategy (FIXED)
-    
-    Logic:
-    1. Poll CLOB API for real-time prices every 1-2 seconds
-    2. Monitor best ask price for winning side
-    3. When time < trigger_seconds AND price < max_price:
-       - Execute market buy order
-    4. Profit from panic selling / liquidity gaps
+    Last-second sniping strategy with REAL orderbook prices
     """
     
     def __init__(self, client, config):
-        """
-        Initialize sniper
-        
-        Args:
-            client: PolymarketClient instance
-            config: Bot configuration
-        """
         self.client = client
         self.config = config
         
         # API endpoints
         self.clob_url = "https://clob.polymarket.com"
+        self.gamma_url = "https://gamma-api.polymarket.com"
         
         # Market state
         self.market = None
-        self.winning_side = None  # 'YES' or 'NO'
+        self.yes_token_id = None
+        self.no_token_id = None
+        self.winning_side = None
         self.winning_token_id = None
         self.best_ask = None
         
@@ -61,18 +37,15 @@ class LastSecondSniper:
         self.monitoring_task = None
     
     async def set_market(self, market: Dict):
-        """
-        Set market and start price monitoring
-        
-        Args:
-            market: Market info dict
-        """
+        """Set market and start price monitoring"""
         self.market = market
+        self.yes_token_id = market.get('yes_token_id', '')
+        self.no_token_id = market.get('no_token_id', '')
         self.sniped = False
         
-        print(f"\n🎯 Sniper armed for: {market['title']}")
+        print(f"\n🎯 Sniper armed for: {market['title'][:50]}...")
         
-        # Determine winning side from current prices
+        # Determine winning side from REAL orderbook prices
         await self._determine_winning_side()
         
         # Start price monitoring task
@@ -80,138 +53,129 @@ class LastSecondSniper:
             self.monitoring_task = asyncio.create_task(self._price_monitor())
     
     async def _determine_winning_side(self):
-        """Determine which side is likely to win based on current price"""
+        """Determine which side is likely to win based on REAL orderbook prices"""
         
-        # Get latest prices from market
-        prices = await self._fetch_current_prices()
+        prices = await self._fetch_clob_prices_async()
         
         if not prices:
             # Fallback to market data
             yes_price = self.market.get('yes_price', 0.5)
             no_price = self.market.get('no_price', 0.5)
         else:
-            yes_price = prices.get('YES', 0.5)
-            no_price = prices.get('NO', 0.5)
+            yes_price = prices.get('yes', 0.5)
+            no_price = prices.get('no', 0.5)
         
         # Side with price > 0.50 is likely winner
-        if yes_price > 0.50:
+        if yes_price > no_price:
             self.winning_side = 'YES'
-            self.winning_token_id = self.market['yes_token_id']
+            self.winning_token_id = self.yes_token_id
+            self.best_ask = yes_price
             print(f"   Predicted winner: YES (price: ${yes_price:.4f})")
         else:
             self.winning_side = 'NO'
-            self.winning_token_id = self.market['no_token_id']
+            self.winning_token_id = self.no_token_id
+            self.best_ask = no_price
             print(f"   Predicted winner: NO (price: ${no_price:.4f})")
     
     async def _price_monitor(self):
-        """
-        Monitor prices via REST API polling (more reliable than WebSocket)
-        
-        Polls CLOB API every 2 seconds for latest prices
-        """
-        print(f"   📡 Price monitoring started (REST API polling)")
+        """Monitor prices via CLOB orderbook polling"""
+        print(f"   📡 Price monitoring started (CLOB orderbook)")
         
         while not self.sniped:
             try:
-                # Fetch current prices
-                prices = await self._fetch_current_prices()
+                prices = await self._fetch_clob_prices_async()
                 
-                if prices and self.winning_side in prices:
-                    self.best_ask = prices[self.winning_side]
+                if prices:
+                    # Update winning side dynamically
+                    yes_price = prices.get('yes', 0.5)
+                    no_price = prices.get('no', 0.5)
+                    
+                    if yes_price > no_price:
+                        self.winning_side = 'YES'
+                        self.winning_token_id = self.yes_token_id
+                        self.best_ask = yes_price
+                    else:
+                        self.winning_side = 'NO'
+                        self.winning_token_id = self.no_token_id
+                        self.best_ask = no_price
                     
                     # Track price history
                     self.price_updates.append({
                         'timestamp': datetime.now().timestamp(),
-                        'price': self.best_ask,
-                        'side': self.winning_side
+                        'yes_price': yes_price,
+                        'no_price': no_price,
+                        'winning_side': self.winning_side,
+                        'best_ask': self.best_ask
                     })
                     
-                    # Limit history to last 100 updates
+                    # Limit history
                     if len(self.price_updates) > 100:
                         self.price_updates.pop(0)
                 
-                # Poll every 2 seconds
-                await asyncio.sleep(2)
+                # Poll every 1 second for sniper (faster than pair trader)
+                await asyncio.sleep(1)
                 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 print(f"⚠️ Price monitor error: {e}")
-                await asyncio.sleep(5)
+                await asyncio.sleep(2)
     
-    async def _fetch_current_prices(self) -> Optional[Dict]:
-        """
-        Fetch current prices from CLOB API
-        
-        Returns:
-            Dict with YES/NO prices or None
-        """
+    async def _fetch_clob_prices_async(self) -> Optional[Dict]:
+        """Fetch real prices from CLOB orderbook (async)"""
         try:
-            url = f"{self.clob_url}/markets"
-            params = {'condition_id': self.market['condition_id']}
+            prices = {}
             
             async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url,
-                    params=params,
-                    timeout=aiohttp.ClientTimeout(total=5)
-                ) as response:
-                    
-                    if response.status != 200:
-                        return None
-                    
-                    data = await response.json()
-                    
-                    # Parse response
-                    if isinstance(data, dict) and 'data' in data:
-                        markets = data['data']
-                    else:
-                        markets = data if isinstance(data, list) else []
-                    
-                    if not markets:
-                        return None
-                    
-                    market = markets[0]
-                    tokens = market.get('tokens', [])
-                    
-                    prices = {}
-                    
-                    for token in tokens:
-                        outcome = token.get('outcome', '').upper()
-                        price = float(token.get('price', 0))
-                        
-                        if outcome in ['YES', 'UP']:
-                            prices['YES'] = price
-                        elif outcome in ['NO', 'DOWN']:
-                            prices['NO'] = price
-                    
-                    return prices if prices else None
-                    
+                # Get YES orderbook
+                if self.yes_token_id:
+                    async with session.get(
+                        f"{self.clob_url}/book",
+                        params={'token_id': self.yes_token_id},
+                        timeout=aiohttp.ClientTimeout(total=3)
+                    ) as response:
+                        if response.status == 200:
+                            book = await response.json()
+                            if book.get('asks'):
+                                prices['yes'] = float(book['asks'][0]['price'])
+                
+                # Get NO orderbook
+                if self.no_token_id:
+                    async with session.get(
+                        f"{self.clob_url}/book",
+                        params={'token_id': self.no_token_id},
+                        timeout=aiohttp.ClientTimeout(total=3)
+                    ) as response:
+                        if response.status == 200:
+                            book = await response.json()
+                            if book.get('asks'):
+                                prices['no'] = float(book['asks'][0]['price'])
+            
+            if 'yes' in prices and 'no' in prices:
+                return prices
+            
+            return None
+            
         except Exception as e:
-            # Suppress errors during polling (too noisy)
             return None
     
     async def execute_snipe(self):
-        """
-        Execute snipe if conditions are met
-        
-        Conditions:
-        1. Not already sniped
-        2. Best ask price available
-        3. Price within limits (< max_price)
-        """
+        """Execute snipe if conditions are met"""
         
         if self.sniped:
             return
         
-        if self.best_ask is None:
-            # No price data yet, try to fetch
-            prices = await self._fetch_current_prices()
-            if prices and self.winning_side in prices:
-                self.best_ask = prices[self.winning_side]
+        # Refresh prices
+        prices = await self._fetch_clob_prices_async()
+        if prices:
+            if self.winning_side == 'YES':
+                self.best_ask = prices.get('yes', self.best_ask)
             else:
-                print(f"   ⚠️ No price data available")
-                return
+                self.best_ask = prices.get('no', self.best_ask)
+        
+        if self.best_ask is None:
+            print(f"   ⚠️ No price data available")
+            return
         
         # Check conditions
         if self.best_ask >= self.config.SNIPE_MAX_PRICE:
@@ -219,8 +183,7 @@ class LastSecondSniper:
             return
         
         if self.best_ask < self.config.SNIPE_MIN_PRICE:
-            print(f"   ⚠️ Suspicious low price: ${self.best_ask:.4f}")
-            # Could be error in data, skip
+            print(f"   ⚠️ Price too low: ${self.best_ask:.4f} (might be wrong side)")
             return
         
         # Calculate potential profit
@@ -245,7 +208,7 @@ class LastSecondSniper:
         if self.config.DRY_RUN:
             print(f"🔔 DRY RUN: Would execute snipe now")
             print(f"   Set DRY_RUN=false in .env to execute real orders")
-            self.sniped = True  # Mark as done
+            self.sniped = True
             self.last_snipe_time = datetime.now()
             return
         
@@ -262,24 +225,13 @@ class LastSecondSniper:
             print(f"❌ Snipe failed - will retry if time permits")
     
     async def _execute_snipe_order(self) -> bool:
-        """
-        Execute the actual snipe order
-        
-        Uses limit order with slight premium for fast fill
-        
-        Returns:
-            True if successful
-        """
+        """Execute the actual snipe order"""
         try:
-            # Calculate shares to buy
             shares = self.config.SNIPE_SIZE_USD / self.best_ask
-            
-            # Create limit order with 0.1% premium for faster fill
-            premium_price = self.best_ask * 1.001
+            premium_price = self.best_ask * 1.005  # 0.5% premium for fast fill
             
             print(f"   Placing order: {shares:.2f} shares @ ${premium_price:.4f}")
             
-            # Place order (synchronous - client is not async)
             order_id = self.client.create_limit_buy_order(
                 token_id=self.winning_token_id,
                 size=shares,
@@ -288,13 +240,7 @@ class LastSecondSniper:
             
             if order_id:
                 print(f"   Order ID: {order_id}")
-                
-                # Wait briefly for potential fill
                 await asyncio.sleep(1)
-                
-                # In production, verify fill via order status API
-                # For now, assume success if order was placed
-                
                 return True
             
             return False
@@ -326,59 +272,83 @@ class LastSecondSniper:
 
 
 # ==========================================
-# TESTING
+# TEST
 # ==========================================
 
 async def test_sniper():
-    """Test sniper with mock data"""
+    """Test sniper with real CLOB data"""
     
-    print("🧪 Testing Last-Second Sniper (FIXED)...\n")
+    print("🧪 Testing Last-Second Sniper V2 (CLOB Prices)...\n")
     
-    # Mock config
     class MockConfig:
         DRY_RUN = True
         SNIPE_TRIGGER_SECONDS = 60
-        SNIPE_MIN_PRICE = 0.90
+        SNIPE_MIN_PRICE = 0.50  # Lowered for testing
         SNIPE_MAX_PRICE = 0.99
         SNIPE_SIZE_USD = 10.0
     
-    # Mock client
     class MockClient:
-        def get_market_price(self, token_id):
-            return 0.97
-        
         def create_limit_buy_order(self, token_id, size, price):
             print(f"   [MOCK] Order: {size:.2f} shares @ ${price:.4f}")
             return "mock_order_123"
     
-    # Mock market
-    mock_market = {
-        'title': 'Test BTC 15min',
-        'condition_id': '0x123',
-        'yes_token_id': '0xYES',
-        'no_token_id': '0xNO',
-        'yes_price': 0.97,
-        'no_price': 0.03,
-        'end_time': '2025-12-08T12:15:00Z'
-    }
+    # We need real token IDs - let's fetch them
+    import aiohttp
     
-    # Create sniper
-    sniper = LastSecondSniper(MockClient(), MockConfig())
-    await sniper.set_market(mock_market)
-    
-    # Simulate price update
-    sniper.best_ask = 0.97
-    
-    # Execute snipe
-    await sniper.execute_snipe()
-    
-    # Show summary
-    print("\n📊 Snipe Summary:")
-    summary = sniper.get_snipe_summary()
-    for key, value in summary.items():
-        print(f"   {key}: {value}")
-    
-    await sniper.cleanup()
+    async with aiohttp.ClientSession() as session:
+        # Find active BTC market
+        async with session.get(
+            "https://gamma-api.polymarket.com/markets",
+            params={'limit': 50, 'closed': 'false', 'active': 'true'}
+        ) as response:
+            if response.status != 200:
+                print("❌ Failed to fetch markets")
+                return
+            
+            markets = await response.json()
+            
+            for market in markets:
+                slug = market.get('slug', '').lower()
+                if 'btc-updown' in slug:
+                    print(f"Found: {market.get('question', 'Unknown')[:50]}")
+                    
+                    import json
+                    clob_tokens = market.get('clobTokenIds')
+                    if isinstance(clob_tokens, str):
+                        clob_tokens = json.loads(clob_tokens.replace("'", '"'))
+                    
+                    outcome_prices = market.get('outcomePrices')
+                    if isinstance(outcome_prices, str):
+                        outcome_prices = json.loads(outcome_prices.replace("'", '"'))
+                    
+                    mock_market = {
+                        'title': market.get('question', 'Test'),
+                        'condition_id': market.get('conditionId', ''),
+                        'yes_token_id': clob_tokens[0] if clob_tokens else '',
+                        'no_token_id': clob_tokens[1] if clob_tokens else '',
+                        'yes_price': float(outcome_prices[0]) if outcome_prices else 0.5,
+                        'no_price': float(outcome_prices[1]) if outcome_prices else 0.5,
+                    }
+                    
+                    sniper = LastSecondSniper(MockClient(), MockConfig())
+                    await sniper.set_market(mock_market)
+                    
+                    # Wait a bit for price updates
+                    await asyncio.sleep(3)
+                    
+                    # Try execute snipe
+                    await sniper.execute_snipe()
+                    
+                    # Show summary
+                    print("\n📊 Snipe Summary:")
+                    summary = sniper.get_snipe_summary()
+                    for key, value in summary.items():
+                        print(f"   {key}: {value}")
+                    
+                    await sniper.cleanup()
+                    break
+            else:
+                print("No BTC updown market found")
 
 
 if __name__ == "__main__":

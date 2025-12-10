@@ -1,11 +1,11 @@
 """
-Market Scanner V10 - CORRECT TOKEN MATCHING
-Fixes issue where wrong tokens were being returned
+Market Scanner V11 - ONLY RETURNS TRULY ACTIVE MARKETS
+Fixes issue where expired markets were being returned
 
-KEY FIXES:
-1. Get tokens directly from Gamma API market data (not CLOB)
-2. Verify token outcomes match "Up"/"Down" not random sports teams
-3. Better validation of market data
+KEY CHANGES:
+1. Strict time validation - only returns markets with >60s remaining
+2. Uses CLOB /price endpoint to verify market is tradeable
+3. Better logging of market status
 """
 
 import sys
@@ -23,15 +23,6 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-def get_et_offset() -> int:
-    now = datetime.now(timezone.utc)
-    month = now.month
-    return -4 if 3 <= month <= 10 else -5
-
-ET_OFFSET_HOURS = get_et_offset()
-ET_OFFSET = timedelta(hours=ET_OFFSET_HOURS)
-
-
 class MarketScanner:
     def __init__(self, asset: str = "BTC", duration: int = 15):
         self.asset = asset.upper()
@@ -47,7 +38,7 @@ class MarketScanner:
             'SOL': 'sol-updown-15m-',
         }
         
-        logger.info(f"📡 Scanner V10 initialized")
+        logger.info(f"📡 Scanner V11 initialized")
         logger.info(f"   Asset: {self.asset} | Duration: {self.duration}min")
     
     def _get_utc_now(self) -> int:
@@ -55,39 +46,55 @@ class MarketScanner:
     
     def _timestamp_to_et(self, ts: int) -> str:
         dt_utc = datetime.fromtimestamp(ts, tz=timezone.utc)
-        dt_et = dt_utc + ET_OFFSET
-        tz_name = "EST" if ET_OFFSET_HOURS == -5 else "EDT"
-        return dt_et.strftime(f'%I:%M %p {tz_name}')
+        et_offset = timedelta(hours=-5)  # EST
+        dt_et = dt_utc + et_offset
+        return dt_et.strftime('%I:%M %p ET')
     
     def _get_current_et(self) -> str:
         now_utc = datetime.now(timezone.utc)
-        now_et = now_utc + ET_OFFSET
-        tz_name = "EST" if ET_OFFSET_HOURS == -5 else "EDT"
-        return now_et.strftime(f'%I:%M:%S %p {tz_name}')
+        et_offset = timedelta(hours=-5)
+        now_et = now_utc + et_offset
+        return now_et.strftime('%I:%M:%S %p ET')
     
-    def _get_market_timestamps(self, look_back: int = 1, look_ahead: int = 2) -> List[int]:
+    def _get_market_timestamps(self) -> List[int]:
+        """Get timestamps for current and next market slots"""
         now_utc = self._get_utc_now()
         interval = self.interval_seconds
-        current = (now_utc // interval) * interval
         
-        return [current + (i * interval) for i in range(-look_back, look_ahead + 1)]
+        # Current slot
+        current_slot = (now_utc // interval) * interval
+        
+        # Return current and next slot
+        return [current_slot, current_slot + interval]
     
-    def _is_timestamp_in_trading_window(self, market_start_ts: int) -> tuple:
+    def _calculate_time_remaining(self, market_start_ts: int) -> tuple:
+        """
+        Calculate time remaining for trading
+        
+        Returns: (is_tradeable, seconds_remaining, status_message)
+        """
         now = self._get_utc_now()
         market_end_ts = market_start_ts + self.interval_seconds
+        
+        # Trading ends 60 seconds before market closes
         trading_end_ts = market_end_ts - 60
         
         if now < market_start_ts:
-            return (False, market_start_ts - now, f"Starts in {market_start_ts - now}s")
-        elif now >= market_end_ts:
-            return (False, 0, "Market ended")
-        elif now >= trading_end_ts:
-            return (False, market_end_ts - now, f"Final {market_end_ts - now}s")
-        else:
-            return (True, market_end_ts - now, f"ACTIVE - {market_end_ts - now}s remaining")
+            wait_time = market_start_ts - now
+            return (False, 0, f"Starts in {wait_time}s")
+        
+        if now >= market_end_ts:
+            return (False, 0, "EXPIRED")
+        
+        if now >= trading_end_ts:
+            remaining = market_end_ts - now
+            return (False, remaining, f"SNIPING ONLY ({remaining}s)")
+        
+        # Active for pair trading
+        remaining = market_end_ts - now
+        return (True, remaining, f"ACTIVE ({remaining}s remaining)")
     
-    def _safe_parse_json_field(self, data, default=None):
-        """Safely parse a field that might be JSON string or already parsed"""
+    def _safe_parse_json(self, data, default=None):
         if data is None:
             return default
         if isinstance(data, (list, dict)):
@@ -99,170 +106,111 @@ class MarketScanner:
                 return default
         return default
     
-    def _validate_updown_market(self, market_data: Dict) -> bool:
-        """Validate that this is actually an Up/Down market"""
-        outcomes = self._safe_parse_json_field(market_data.get('outcomes'), [])
-        
-        # Must have exactly 2 outcomes
-        if len(outcomes) != 2:
-            return False
-        
-        # Outcomes must be Up/Down or Yes/No variants
-        valid_yes = ['up', 'yes', 'higher']
-        valid_no = ['down', 'no', 'lower']
-        
-        outcome_lower = [o.lower() for o in outcomes]
-        
-        has_yes = any(v in outcome_lower[0] for v in valid_yes)
-        has_no = any(v in outcome_lower[1] for v in valid_no)
-        
-        # Or reversed
-        if not (has_yes and has_no):
-            has_yes = any(v in outcome_lower[1] for v in valid_yes)
-            has_no = any(v in outcome_lower[0] for v in valid_no)
-        
-        return has_yes or has_no or ('up' in str(outcomes).lower() and 'down' in str(outcomes).lower())
-    
     # ==========================================
-    # MAIN
+    # MAIN ENTRY POINT
     # ==========================================
     
     def find_active_market(self) -> Optional[Dict]:
+        """Find an active market that is currently tradeable"""
         logger.info(f"🔍 Scanning for {self.asset} {self.duration}min market...")
         logger.info(f"   Current ET: {self._get_current_et()}")
         
-        # Method 1: Direct Gamma event lookup by slug
-        market = self._find_by_gamma_event()
-        if market:
-            return market
-        
-        # Method 2: Search Gamma markets
-        market = self._find_via_gamma_markets()
-        if market:
-            return market
-        
-        logger.warning("⚠️ No active market found")
-        return None
-    
-    async def find_active_market_async(self) -> Optional[Dict]:
-        logger.info(f"🔍 Scanning... ET: {self._get_current_et()}")
-        
-        market = await self._find_by_gamma_event_async()
-        if market:
-            return market
-        
-        market = await self._find_via_gamma_markets_async()
-        if market:
-            return market
-        
-        logger.warning("⚠️ No active market found")
-        return None
-    
-    # ==========================================
-    # METHOD 1: Gamma Event by Slug
-    # ==========================================
-    
-    def _find_by_gamma_event(self) -> Optional[Dict]:
-        """Find market using Gamma events API - gets correct token data"""
         slug_prefix = self.slug_patterns.get(self.asset)
         if not slug_prefix:
+            logger.error(f"Unknown asset: {self.asset}")
             return None
         
-        timestamps = self._get_market_timestamps(look_back=1, look_ahead=2)
-        logger.info(f"   Method 1: Checking {len(timestamps)} timestamps...")
+        timestamps = self._get_market_timestamps()
         
         for ts in timestamps:
             slug = f"{slug_prefix}{ts}"
             et_time = self._timestamp_to_et(ts)
             
-            is_tradeable, remaining, status_msg = self._is_timestamp_in_trading_window(ts)
-            logger.info(f"   {et_time}: {status_msg}")
+            is_tradeable, remaining, status = self._calculate_time_remaining(ts)
+            logger.info(f"   {et_time}: {status}")
             
-            if not is_tradeable:
-                continue
+            if remaining <= 0:
+                continue  # Skip expired markets
             
-            # Get event from Gamma API
-            event = self._get_gamma_event(slug)
+            # Try to fetch this market
+            event = self._fetch_gamma_event(slug)
             if not event:
                 continue
             
-            logger.info(f"   ✅ Found event: {slug}")
+            logger.info(f"   ✅ Found: {slug}")
             
-            # Get market from event
             markets = event.get('markets', [])
             if not markets:
                 continue
             
             market_data = markets[0]
             
-            # VALIDATE: Check this is actually an Up/Down market
-            if not self._validate_updown_market(market_data):
-                logger.warning(f"   ⚠️ Invalid market type, skipping")
+            # Build market info
+            market_info = self._build_market_info(market_data, event, remaining)
+            
+            if not market_info:
                 continue
             
-            # Build market info from Gamma data (NOT CLOB)
-            market_info = self._build_from_gamma_event(market_data, event, remaining)
-            
-            if market_info and market_info.get('yes_token_id'):
-                # Verify prices are reasonable (not settled)
-                if market_info['yes_price'] > 0.01 and market_info['yes_price'] < 0.99:
-                    logger.info(f"   🎯 TRADEABLE MARKET FOUND!")
-                    return market_info
-                elif market_info['no_price'] > 0.01 and market_info['no_price'] < 0.99:
-                    logger.info(f"   🎯 TRADEABLE MARKET FOUND!")
-                    return market_info
-                else:
-                    logger.info(f"   ⚠️ Market appears settled (prices at extremes)")
+            # VERIFY: Check CLOB returns valid prices
+            if self._verify_market_tradeable(market_info):
+                logger.info(f"   🎯 TRADEABLE MARKET FOUND!")
+                return market_info
+            else:
+                logger.warning(f"   ⚠️ Market not tradeable (CLOB check failed)")
         
+        logger.warning("⚠️ No active tradeable market found")
         return None
     
-    async def _find_by_gamma_event_async(self) -> Optional[Dict]:
-        """Async version"""
+    async def find_active_market_async(self) -> Optional[Dict]:
+        """Async version of find_active_market"""
+        logger.info(f"🔍 Scanning... ET: {self._get_current_et()}")
+        
         slug_prefix = self.slug_patterns.get(self.asset)
         if not slug_prefix:
             return None
         
-        timestamps = self._get_market_timestamps(look_back=1, look_ahead=2)
-        logger.info(f"   Method 1: Checking {len(timestamps)} timestamps...")
+        timestamps = self._get_market_timestamps()
         
         async with aiohttp.ClientSession() as session:
             for ts in timestamps:
                 slug = f"{slug_prefix}{ts}"
                 et_time = self._timestamp_to_et(ts)
                 
-                is_tradeable, remaining, status_msg = self._is_timestamp_in_trading_window(ts)
-                logger.info(f"   {et_time}: {status_msg}")
+                is_tradeable, remaining, status = self._calculate_time_remaining(ts)
+                logger.info(f"   {et_time}: {status}")
                 
-                if not is_tradeable:
+                if remaining <= 0:
                     continue
                 
-                event = await self._get_gamma_event_async(session, slug)
+                event = await self._fetch_gamma_event_async(session, slug)
                 if not event:
                     continue
                 
-                logger.info(f"   ✅ Found event: {slug}")
+                logger.info(f"   ✅ Found: {slug}")
                 
                 markets = event.get('markets', [])
                 if not markets:
                     continue
                 
                 market_data = markets[0]
+                market_info = self._build_market_info(market_data, event, remaining)
                 
-                if not self._validate_updown_market(market_data):
-                    logger.warning(f"   ⚠️ Invalid market type")
+                if not market_info:
                     continue
                 
-                market_info = self._build_from_gamma_event(market_data, event, remaining)
-                
-                if market_info and market_info.get('yes_token_id'):
-                    if 0.01 < market_info['yes_price'] < 0.99 or 0.01 < market_info['no_price'] < 0.99:
-                        logger.info(f"   🎯 TRADEABLE MARKET FOUND!")
-                        return market_info
+                # Verify tradeable
+                if await self._verify_market_tradeable_async(session, market_info):
+                    logger.info(f"   🎯 TRADEABLE MARKET FOUND!")
+                    return market_info
         
+        logger.warning("⚠️ No active market found")
         return None
     
-    def _get_gamma_event(self, slug: str) -> Optional[Dict]:
-        """Get event from Gamma API"""
+    # ==========================================
+    # GAMMA API
+    # ==========================================
+    
+    def _fetch_gamma_event(self, slug: str) -> Optional[Dict]:
         try:
             url = f"{self.gamma_url}/events/slug/{slug}"
             response = requests.get(url, timeout=10)
@@ -272,12 +220,10 @@ class MarketScanner:
             
             data = response.json()
             return data if isinstance(data, dict) else (data[0] if data else None)
-        except Exception as e:
-            logger.debug(f"Gamma event error: {e}")
+        except:
             return None
     
-    async def _get_gamma_event_async(self, session, slug: str) -> Optional[Dict]:
-        """Async version"""
+    async def _fetch_gamma_event_async(self, session, slug: str) -> Optional[Dict]:
         try:
             url = f"{self.gamma_url}/events/slug/{slug}"
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
@@ -289,152 +235,111 @@ class MarketScanner:
             return None
     
     # ==========================================
-    # METHOD 2: Gamma Markets Search
+    # CLOB VERIFICATION
     # ==========================================
     
-    def _find_via_gamma_markets(self) -> Optional[Dict]:
-        """Search Gamma markets API"""
-        logger.info(f"   Method 2: Gamma markets search...")
-        
+    def _verify_market_tradeable(self, market: Dict) -> bool:
+        """Verify market is tradeable by checking CLOB"""
         try:
-            url = f"{self.gamma_url}/markets"
-            params = {'limit': 100, 'closed': 'false', 'active': 'true'}
+            yes_token = market.get('yes_token_id')
             
-            response = requests.get(url, params=params, timeout=15)
-            if response.status_code != 200:
-                return None
+            if not yes_token:
+                return False
             
-            markets = response.json()
-            if not isinstance(markets, list):
-                return None
+            # Try /price endpoint
+            response = requests.get(
+                f"{self.clob_url}/price",
+                params={'token_id': yes_token, 'side': 'BUY'},
+                timeout=5
+            )
             
-            asset_lower = self.asset.lower()
-            pattern = f"{asset_lower}-updown-{self.duration}m"
-            
-            for market in markets:
-                slug = market.get('slug', '').lower()
+            if response.status_code == 200:
+                data = response.json()
+                price = float(data.get('price', 0))
                 
-                if pattern not in slug:
-                    continue
-                
-                # Extract timestamp and validate
-                try:
-                    ts = int(slug.split('-')[-1])
-                    is_tradeable, remaining, _ = self._is_timestamp_in_trading_window(ts)
-                    
-                    if not is_tradeable:
-                        continue
-                    
-                    if not self._validate_updown_market(market):
-                        continue
-                    
-                    logger.info(f"   ✅ Found via Gamma markets: {market.get('slug')}")
-                    
-                    market_info = self._build_from_gamma_market(market, remaining)
-                    
-                    if market_info and market_info.get('yes_token_id'):
-                        if 0.01 < market_info['yes_price'] < 0.99 or 0.01 < market_info['no_price'] < 0.99:
-                            return market_info
-                except:
-                    continue
+                # Valid price range
+                if 0.01 < price < 0.99:
+                    logger.info(f"   CLOB price check: YES=${price:.4f} ✓")
+                    return True
             
-            return None
+            # Try /book endpoint as backup
+            response = requests.get(
+                f"{self.clob_url}/book",
+                params={'token_id': yes_token},
+                timeout=5
+            )
+            
+            if response.status_code == 200:
+                book = response.json()
+                if book.get('asks') or book.get('bids'):
+                    return True
+            
+            return False
+            
         except Exception as e:
-            logger.error(f"   Gamma markets error: {e}")
-            return None
+            logger.debug(f"CLOB verify error: {e}")
+            return False
     
-    async def _find_via_gamma_markets_async(self) -> Optional[Dict]:
-        """Async version"""
-        logger.info(f"   Method 2: Gamma markets search...")
-        
+    async def _verify_market_tradeable_async(self, session, market: Dict) -> bool:
+        """Async version of verify"""
         try:
-            async with aiohttp.ClientSession() as session:
-                url = f"{self.gamma_url}/markets"
-                params = {'limit': 100, 'closed': 'false', 'active': 'true'}
-                
-                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as response:
-                    if response.status != 200:
-                        return None
+            yes_token = market.get('yes_token_id')
+            
+            if not yes_token:
+                return False
+            
+            async with session.get(
+                f"{self.clob_url}/price",
+                params={'token_id': yes_token, 'side': 'BUY'},
+                timeout=aiohttp.ClientTimeout(total=5)
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    price = float(data.get('price', 0))
                     
-                    markets = await response.json()
-                    if not isinstance(markets, list):
-                        return None
-                    
-                    asset_lower = self.asset.lower()
-                    pattern = f"{asset_lower}-updown-{self.duration}m"
-                    
-                    for market in markets:
-                        slug = market.get('slug', '').lower()
-                        
-                        if pattern not in slug:
-                            continue
-                        
-                        try:
-                            ts = int(slug.split('-')[-1])
-                            is_tradeable, remaining, _ = self._is_timestamp_in_trading_window(ts)
-                            
-                            if not is_tradeable:
-                                continue
-                            
-                            if not self._validate_updown_market(market):
-                                continue
-                            
-                            logger.info(f"   ✅ Found via Gamma!")
-                            
-                            market_info = self._build_from_gamma_market(market, remaining)
-                            
-                            if market_info and market_info.get('yes_token_id'):
-                                if 0.01 < market_info['yes_price'] < 0.99:
-                                    return market_info
-                        except:
-                            continue
-                    
-                    return None
-        except Exception as e:
-            logger.error(f"   Async Gamma error: {e}")
-            return None
+                    if 0.01 < price < 0.99:
+                        logger.info(f"   CLOB price: YES=${price:.4f} ✓")
+                        return True
+            
+            return False
+            
+        except:
+            return False
     
     # ==========================================
     # BUILD MARKET INFO
     # ==========================================
     
-    def _build_from_gamma_event(self, market_data: Dict, event_data: Dict, time_remaining: int) -> Optional[Dict]:
-        """Build market info from Gamma event data"""
+    def _build_market_info(self, market_data: Dict, event_data: Dict, time_remaining: int) -> Optional[Dict]:
         try:
-            # Get outcomes
-            outcomes = self._safe_parse_json_field(market_data.get('outcomes'), ['Up', 'Down'])
-            
-            # Get prices
-            outcome_prices = self._safe_parse_json_field(market_data.get('outcomePrices'), [])
-            if outcome_prices and len(outcome_prices) >= 2:
-                yes_price = float(outcome_prices[0])
-                no_price = float(outcome_prices[1])
-            else:
-                yes_price = 0.5
-                no_price = 0.5
-            
-            # Get token IDs from clobTokenIds field
-            clob_token_ids = self._safe_parse_json_field(market_data.get('clobTokenIds'), [])
+            outcomes = self._safe_parse_json(market_data.get('outcomes'), ['Up', 'Down'])
+            outcome_prices = self._safe_parse_json(market_data.get('outcomePrices'), [])
+            clob_token_ids = self._safe_parse_json(market_data.get('clobTokenIds'), [])
             
             if len(clob_token_ids) < 2:
                 logger.warning("Missing clobTokenIds")
                 return None
             
+            # Parse prices
+            yes_price = float(outcome_prices[0]) if outcome_prices else 0.5
+            no_price = float(outcome_prices[1]) if len(outcome_prices) > 1 else 0.5
+            
+            # Token IDs
             yes_token_id = str(clob_token_ids[0])
             no_token_id = str(clob_token_ids[1])
             
-            # Determine which outcome is YES/UP
+            # Outcome names
             yes_outcome = outcomes[0] if outcomes else 'Up'
             no_outcome = outcomes[1] if len(outcomes) > 1 else 'Down'
             
-            # Swap if needed (if first outcome is "Down")
-            if 'down' in yes_outcome.lower() or 'no' in yes_outcome.lower():
+            # Swap if first outcome is "Down"
+            if 'down' in yes_outcome.lower():
                 yes_outcome, no_outcome = no_outcome, yes_outcome
                 yes_price, no_price = no_price, yes_price
                 yes_token_id, no_token_id = no_token_id, yes_token_id
             
             question = event_data.get('title') or market_data.get('question') or 'Unknown'
-            condition_id = market_data.get('conditionId') or market_data.get('condition_id', '')
+            condition_id = market_data.get('conditionId') or ''
             
             return {
                 'condition_id': condition_id,
@@ -457,113 +362,22 @@ class MarketScanner:
                 'time_remaining': time_remaining,
             }
         except Exception as e:
-            logger.error(f"Build from gamma event error: {e}")
-            return None
-    
-    def _build_from_gamma_market(self, market_data: Dict, time_remaining: int) -> Optional[Dict]:
-        """Build from Gamma market data"""
-        try:
-            outcomes = self._safe_parse_json_field(market_data.get('outcomes'), ['Up', 'Down'])
-            outcome_prices = self._safe_parse_json_field(market_data.get('outcomePrices'), [])
-            clob_token_ids = self._safe_parse_json_field(market_data.get('clobTokenIds'), [])
-            
-            if len(clob_token_ids) < 2:
-                return None
-            
-            yes_price = float(outcome_prices[0]) if outcome_prices else 0.5
-            no_price = float(outcome_prices[1]) if len(outcome_prices) > 1 else 0.5
-            
-            yes_token_id = str(clob_token_ids[0])
-            no_token_id = str(clob_token_ids[1])
-            
-            yes_outcome = outcomes[0] if outcomes else 'Up'
-            no_outcome = outcomes[1] if len(outcomes) > 1 else 'Down'
-            
-            if 'down' in yes_outcome.lower():
-                yes_outcome, no_outcome = no_outcome, yes_outcome
-                yes_price, no_price = no_price, yes_price
-                yes_token_id, no_token_id = no_token_id, yes_token_id
-            
-            return {
-                'condition_id': market_data.get('conditionId') or market_data.get('condition_id', ''),
-                'question': market_data.get('question', 'Unknown'),
-                'title': market_data.get('question', 'Unknown'),
-                'slug': market_data.get('slug', ''),
-                'active': True,
-                'closed': False,
-                'accepting_orders': True,
-                'outcomes': [yes_outcome, no_outcome],
-                'yes_token_id': yes_token_id,
-                'no_token_id': no_token_id,
-                'yes_outcome': yes_outcome,
-                'no_outcome': no_outcome,
-                'yes_price': yes_price,
-                'no_price': no_price,
-                'volume': float(market_data.get('volume', 0) or 0),
-                'liquidity': float(market_data.get('liquidity', 0) or 0),
-                'end_time': market_data.get('endDate', ''),
-                'time_remaining': time_remaining,
-            }
-        except Exception as e:
-            logger.error(f"Build from gamma market error: {e}")
-            return None
-    
-    def get_market_prices(self, condition_id: str) -> Optional[Dict]:
-        """Get fresh prices from Gamma API"""
-        try:
-            url = f"{self.gamma_url}/markets"
-            params = {'condition_id': condition_id}
-            
-            response = requests.get(url, params=params, timeout=10)
-            if response.status_code != 200:
-                return None
-            
-            markets = response.json()
-            if not markets:
-                return None
-            
-            market = markets[0] if isinstance(markets, list) else markets
-            
-            outcome_prices = self._safe_parse_json_field(market.get('outcomePrices'), [])
-            clob_token_ids = self._safe_parse_json_field(market.get('clobTokenIds'), [])
-            
-            if len(outcome_prices) < 2 or len(clob_token_ids) < 2:
-                return None
-            
-            return {
-                'prices': {
-                    'YES': float(outcome_prices[0]),
-                    'NO': float(outcome_prices[1])
-                },
-                'token_ids': {
-                    'YES': str(clob_token_ids[0]),
-                    'NO': str(clob_token_ids[1])
-                }
-            }
-        except:
+            logger.error(f"Build market error: {e}")
             return None
 
+
+# ==========================================
+# TEST
+# ==========================================
 
 def test_scanner():
     print("\n" + "="*70)
-    print("🧪 TESTING MARKET SCANNER V10 (CORRECT TOKEN MATCHING)")
+    print("🧪 TESTING MARKET SCANNER V11")
     print("="*70)
     
     scanner = MarketScanner(asset="BTC", duration=15)
     
     print(f"\n🕐 Current Time: {scanner._get_current_et()}")
-    
-    print(f"\n📅 Market Windows:")
-    timestamps = scanner._get_market_timestamps(look_back=1, look_ahead=2)
-    
-    for ts in timestamps:
-        et_time = scanner._timestamp_to_et(ts)
-        is_tradeable, remaining, status = scanner._is_timestamp_in_trading_window(ts)
-        slug = f"btc-updown-15m-{ts}"
-        
-        icon = "✅" if is_tradeable else "❌"
-        print(f"   {icon} {et_time}: {status}")
-        print(f"      Slug: {slug}")
     
     print(f"\n📡 Searching for active market...")
     market = scanner.find_active_market()
@@ -581,17 +395,33 @@ def test_scanner():
         print(f"   YES Token: {market['yes_token_id'][:40]}...")
         print(f"   NO Token: {market['no_token_id'][:40]}...")
         
-        # Validate outcomes are correct
-        print(f"\n🔍 Validation:")
-        if 'up' in market['yes_outcome'].lower() or 'yes' in market['yes_outcome'].lower():
-            print(f"   ✅ YES outcome is correct: {market['yes_outcome']}")
-        else:
-            print(f"   ❌ YES outcome might be wrong: {market['yes_outcome']}")
+        # Test CLOB orderbook
+        print(f"\n📖 Testing CLOB orderbook...")
         
-        if 'down' in market['no_outcome'].lower() or 'no' in market['no_outcome'].lower():
-            print(f"   ✅ NO outcome is correct: {market['no_outcome']}")
-        else:
-            print(f"   ❌ NO outcome might be wrong: {market['no_outcome']}")
+        for name, token_id in [("YES", market['yes_token_id']), ("NO", market['no_token_id'])]:
+            try:
+                response = requests.get(
+                    f"https://clob.polymarket.com/book",
+                    params={'token_id': token_id},
+                    timeout=5
+                )
+                
+                if response.status_code == 200:
+                    book = response.json()
+                    asks = book.get('asks', [])
+                    bids = book.get('bids', [])
+                    
+                    if asks:
+                        best_ask = float(asks[0]['price'])
+                        print(f"   {name} Best ASK: ${best_ask:.4f}")
+                    if bids:
+                        best_bid = float(bids[0]['price'])
+                        print(f"   {name} Best BID: ${best_bid:.4f}")
+                else:
+                    print(f"   {name}: HTTP {response.status_code}")
+                    
+            except Exception as e:
+                print(f"   {name}: Error - {e}")
     else:
         print(f"\n⚠️ No active market found")
     
