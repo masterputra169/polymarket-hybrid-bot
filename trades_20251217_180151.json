@@ -1,0 +1,12 @@
+[
+  {
+    "timestamp": 1765969269.515062,
+    "side": "NO",
+    "type": "BUY",
+    "outcome": "Down",
+    "price": 0.4,
+    "size": 1.875,
+    "cost": 0.75,
+    "dry_run": true
+  }
+]

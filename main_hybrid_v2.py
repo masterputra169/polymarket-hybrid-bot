@@ -1,6 +1,11 @@
 """
-Polymarket Hybrid Trading Bot V2 - Asymmetric Strategy (Gabagool's Real Approach)
-Strategy switch: Can use ASYMMETRIC (gabagool's real way) or PAIR (old symmetric)
+Polymarket Hybrid Trading Bot V2 - Asymmetric Strategy - FIXED VERSION
+
+FIXES:
+- Added market warmup period (15s wait after finding new market)
+- Better time remaining calculation
+- Improved error handling
+- More conservative trading approach
 """
 
 import os
@@ -35,6 +40,7 @@ class HybridTradingBot:
         self.monitor = None
         
         self.current_market = None
+        self.market_start_time = None  # Track when we found the market
         self.trading_mode = None
         self.markets_traded = 0
         
@@ -201,6 +207,7 @@ class HybridTradingBot:
                     
                     if market:
                         self.current_market = market
+                        self.market_start_time = datetime.now()
                         self.markets_traded += 1
                         
                         self.logger.info(f"🎯 MARKET #{self.markets_traded} FOUND!")
@@ -213,6 +220,14 @@ class HybridTradingBot:
                         pair_cost = market['yes_price'] + market['no_price']
                         self.logger.info(f"   Pair Cost: ${pair_cost:.4f}")
                         
+                        # WAIT for market to stabilize (15 seconds)
+                        remaining = market.get('time_remaining', 0)
+                        if remaining > 800:  # More than 13 min remaining (market just started)
+                            self.logger.info(f"\n⏳ WARMUP: Waiting 15s for orderbook to stabilize...")
+                            self.logger.info(f"   This prevents failed orders due to stale prices")
+                            await asyncio.sleep(15)
+                            self.logger.info(f"   ✅ Warmup complete, starting trading...\n")
+                        
                         # Initialize trader and sniper
                         self.trader.set_market(market)
                         await self.sniper.set_market(market)
@@ -222,14 +237,19 @@ class HybridTradingBot:
                         await asyncio.sleep(30)
                         continue
                 
-                # Get time remaining
-                time_remaining = self.current_market.get('time_remaining', 0)
+                # Calculate actual time remaining
+                if self.market_start_time:
+                    elapsed = (datetime.now() - self.market_start_time).total_seconds()
+                    time_remaining = max(0, self.current_market.get('time_remaining', 0) - elapsed)
+                else:
+                    time_remaining = self.current_market.get('time_remaining', 0)
                 
-                # Recalculate time remaining
+                # Check if market ended
                 if time_remaining <= 0:
-                    self.logger.info("📊 Market ended - generating report...")
+                    self.logger.info("\n📊 Market ended - generating report...")
                     self.monitor.generate_final_report()
                     self.current_market = None
+                    self.market_start_time = None
                     self.trading_mode = None
                     await asyncio.sleep(10)
                     continue
@@ -237,7 +257,7 @@ class HybridTradingBot:
                 # Determine mode
                 if time_remaining <= self.config.SNIPE_TRIGGER_SECONDS:
                     if self.trading_mode != 'SNIPING':
-                        self.logger.info(f"\n🎯 SNIPING MODE ({time_remaining}s remaining)")
+                        self.logger.info(f"\n🎯 SNIPING MODE ({int(time_remaining)}s remaining)")
                         self.trading_mode = 'SNIPING'
                         self.trader.cleanup()
                     
@@ -245,17 +265,20 @@ class HybridTradingBot:
                 else:
                     if self.trading_mode != 'TRADING':
                         strategy_desc = "ASYMMETRIC ARBITRAGE" if self.config.STRATEGY_TYPE == "ASYMMETRIC" else "PAIR TRADING"
-                        self.logger.info(f"\n💰 {strategy_desc} MODE ({time_remaining}s remaining)")
+                        self.logger.info(f"\n💰 {strategy_desc} MODE ({int(time_remaining)}s remaining)")
                         self.trading_mode = 'TRADING'
                     
                     # Execute trading cycle
-                    self.trader.execute_trading_cycle()
-                
-                # Decrement time remaining
-                self.current_market['time_remaining'] = time_remaining - self.config.POLLING_INTERVAL
+                    try:
+                        self.trader.execute_trading_cycle()
+                    except Exception as e:
+                        self.logger.error(f"Trading cycle error: {e}")
                 
                 # Update monitor
-                self.monitor.update()
+                try:
+                    self.monitor.update()
+                except Exception as e:
+                    self.logger.error(f"Monitor error: {e}")
                 
                 # Wait before next cycle
                 await asyncio.sleep(self.config.POLLING_INTERVAL)
@@ -276,15 +299,24 @@ class HybridTradingBot:
         
         if self.monitor and self.current_market:
             self.logger.info("📈 Generating final report...")
-            self.monitor.generate_final_report()
+            try:
+                self.monitor.generate_final_report()
+            except Exception as e:
+                self.logger.error(f"Report generation error: {e}")
         
         if self.trader:
             self.logger.info("💰 Closing positions...")
-            self.trader.cleanup()
+            try:
+                self.trader.cleanup()
+            except Exception as e:
+                self.logger.error(f"Trader cleanup error: {e}")
         
         if self.sniper:
             self.logger.info("🎯 Closing sniper...")
-            await self.sniper.cleanup()
+            try:
+                await self.sniper.cleanup()
+            except Exception as e:
+                self.logger.error(f"Sniper cleanup error: {e}")
         
         self.logger.info(f"\n📊 Session Summary:")
         self.logger.info(f"   Strategy Used: {self.config.STRATEGY_TYPE}")

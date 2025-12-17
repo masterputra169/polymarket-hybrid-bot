@@ -1,0 +1,22 @@
+======================================================================
+POLYMARKET PAIR TRADING - SESSION REPORT
+======================================================================
+
+Market: Bitcoin Up or Down - December 17, 6:00AM-6:15AM ET
+Condition ID: 0x3c8b2f6f5d3a50505573040dafb4c041660b63d67d956c2e6dfa0bc28104da9f
+Outcomes: ['Up', 'Down']
+
+FINAL POSITION:
+  YES Shares: 0.00 ($0.00)
+  NO Shares:  1.88 ($0.75)
+  Total Spent: $0.75
+  Min Shares: 0.00
+  Potential Profit: $-0.75 (-100.00%)
+
+TRADES:
+
+Time                | Side | Price    | Shares   | Cost
+------------------------------------------------------------
+2025-12-17 18:01:09 | NO   | $0.4000 |     1.88 | $   0.75
+
+======================================================================

@@ -1,9 +1,9 @@
 """
-Market Scanner V12 - FIXED TIME CALCULATION
-Key fixes:
-- Accurate time remaining calculation
-- Proper handling of markets already in progress
-- Better validation of tradeable markets
+Market Scanner V13 - IMPROVED
+Key improvements:
+- Skip markets with < 5 minutes remaining (too late for pair trading)
+- Better handling of markets already in progress
+- More accurate time remaining calculation
 """
 
 import sys
@@ -36,8 +36,12 @@ class MarketScanner:
             'SOL': 'sol-updown-15m-',
         }
         
-        logger.info(f"📡 Scanner V12 initialized")
+        # Minimum time remaining to consider market (5 minutes)
+        self.min_time_remaining = 300  # seconds
+        
+        logger.info(f"📡 Scanner V13 initialized")
         logger.info(f"   Asset: {self.asset} | Duration: {self.duration}min")
+        logger.info(f"   Min time remaining: {self.min_time_remaining}s")
     
     def _get_utc_now(self) -> int:
         return int(datetime.now(timezone.utc).timestamp())
@@ -65,7 +69,7 @@ class MarketScanner:
     
     def _calculate_time_remaining(self, market_start_ts: int) -> tuple:
         """
-        FIXED: Calculate time remaining accurately
+        Calculate time remaining accurately
         
         Args:
             market_start_ts: Unix timestamp when market STARTED
@@ -88,6 +92,11 @@ class MarketScanner:
         # Market has ended
         if seconds_until_end <= 0:
             return (False, 0, "EXPIRED")
+        
+        # Market too close to end (< 5 minutes remaining)
+        # Skip for pair trading, only good for sniping
+        if seconds_until_end < self.min_time_remaining:
+            return (False, seconds_until_end, f"TOO LATE ({seconds_until_end}s, need >{self.min_time_remaining}s)")
         
         # Market in final 60 seconds (sniping only)
         if seconds_until_end <= 60:
@@ -131,8 +140,8 @@ class MarketScanner:
             is_tradeable, remaining, status = self._calculate_time_remaining(ts)
             logger.info(f"   {et_time}: {status}")
             
-            # Skip completely expired markets
-            if remaining <= 0 and "SNIPING" not in status:
+            # Skip if not tradeable
+            if not is_tradeable:
                 continue
             
             # Try to fetch this market
@@ -154,19 +163,15 @@ class MarketScanner:
             if not market_info:
                 continue
             
-            # Mark if snipe-only
-            market_info['snipe_only'] = (remaining <= 60 and remaining > 0)
-            market_info['is_tradeable'] = is_tradeable or market_info['snipe_only']
-            
             # Verify market is tradeable via CLOB
             if self._verify_market_tradeable(market_info):
-                mode = "SNIPE-ONLY" if market_info['snipe_only'] else "TRADEABLE"
-                logger.info(f"   🎯 {mode} MARKET FOUND!")
+                logger.info(f"   🎯 TRADEABLE MARKET FOUND!")
                 return market_info
             else:
                 logger.warning(f"   ⚠️ Market not tradeable (CLOB check failed)")
         
         logger.warning("⚠️ No active tradeable market found")
+        logger.info(f"   💡 Markets need >{self.min_time_remaining}s remaining for pair trading")
         return None
     
     async def find_active_market_async(self) -> Optional[Dict]:
@@ -187,7 +192,7 @@ class MarketScanner:
                 is_tradeable, remaining, status = self._calculate_time_remaining(ts)
                 logger.info(f"   {et_time}: {status}")
                 
-                if remaining <= 0 and "SNIPING" not in status:
+                if not is_tradeable:
                     continue
                 
                 event = await self._fetch_gamma_event_async(session, slug)
@@ -206,15 +211,12 @@ class MarketScanner:
                 if not market_info:
                     continue
                 
-                market_info['snipe_only'] = (remaining <= 60 and remaining > 0)
-                market_info['is_tradeable'] = is_tradeable or market_info['snipe_only']
-                
                 if await self._verify_market_tradeable_async(session, market_info):
-                    mode = "SNIPE-ONLY" if market_info['snipe_only'] else "TRADEABLE"
-                    logger.info(f"   🎯 {mode} MARKET FOUND!")
+                    logger.info(f"   🎯 TRADEABLE MARKET FOUND!")
                     return market_info
         
         logger.warning("⚠️ No active market found")
+        logger.info(f"   💡 Next market may be available soon")
         return None
     
     # ==========================================
@@ -268,7 +270,7 @@ class MarketScanner:
                 price = float(data.get('price', 0))
                 
                 if 0.01 < price < 0.99:
-                    logger.info(f"   CLOB price check: YES=${price:.4f} ✓")
+                    logger.info(f"   CLOB price: YES=${price:.4f} ✓")
                     return True
             
             response = requests.get(
@@ -372,12 +374,13 @@ class MarketScanner:
 
 if __name__ == "__main__":
     print("\n" + "="*70)
-    print("🧪 TESTING MARKET SCANNER V12")
+    print("🧪 TESTING MARKET SCANNER V13")
     print("="*70)
     
     scanner = MarketScanner(asset="BTC", duration=15)
     
     print(f"\n🕐 Current Time: {scanner._get_current_et()}")
+    print(f"🔍 Min time remaining: {scanner.min_time_remaining}s ({scanner.min_time_remaining//60} minutes)")
     print(f"\n📡 Searching for active market...")
     
     market = scanner.find_active_market()
@@ -388,11 +391,11 @@ if __name__ == "__main__":
         print(f"{'='*70}")
         print(f"   Title: {market['question'][:60]}...")
         print(f"   Time Remaining: {market.get('time_remaining', 'N/A')}s")
-        print(f"   Snipe Only: {market.get('snipe_only', False)}")
         print(f"   YES: ${market['yes_price']:.4f}")
         print(f"   NO: ${market['no_price']:.4f}")
         print(f"   Pair Cost: ${market['yes_price'] + market['no_price']:.4f}")
     else:
         print(f"\n⚠️ No active market found")
+        print(f"💡 Markets need >{scanner.min_time_remaining}s remaining")
     
     print("\n" + "="*70)
