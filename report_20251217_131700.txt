@@ -2,8 +2,8 @@
 POLYMARKET PAIR TRADING - SESSION REPORT
 ======================================================================
 
-Market: Bitcoin Up or Down - December 10, 5:30AM-5:45AM ET
-Condition ID: 0x7dffe552900cd0cc5d4107bfa05ee2010d5c424caa94f284f68f0c148048c5d4
+Market: Bitcoin Up or Down - December 17, 1:15AM-1:30AM ET
+Condition ID: 0xb7fcc60c06b4fff29042446f0838a1fb21acd52ffed43a12c834d7fe7633b8c2
 Outcomes: ['Up', 'Down']
 
 FINAL POSITION:

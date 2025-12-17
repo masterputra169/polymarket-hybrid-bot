@@ -1,11 +1,9 @@
 """
-Market Scanner V11 - ONLY RETURNS TRULY ACTIVE MARKETS
-Fixes issue where expired markets were being returned
-
-KEY CHANGES:
-1. Strict time validation - only returns markets with >60s remaining
-2. Uses CLOB /price endpoint to verify market is tradeable
-3. Better logging of market status
+Market Scanner V12 - FIXED TIME CALCULATION
+Key fixes:
+- Accurate time remaining calculation
+- Proper handling of markets already in progress
+- Better validation of tradeable markets
 """
 
 import sys
@@ -38,7 +36,7 @@ class MarketScanner:
             'SOL': 'sol-updown-15m-',
         }
         
-        logger.info(f"📡 Scanner V11 initialized")
+        logger.info(f"📡 Scanner V12 initialized")
         logger.info(f"   Asset: {self.asset} | Duration: {self.duration}min")
     
     def _get_utc_now(self) -> int:
@@ -46,7 +44,7 @@ class MarketScanner:
     
     def _timestamp_to_et(self, ts: int) -> str:
         dt_utc = datetime.fromtimestamp(ts, tz=timezone.utc)
-        et_offset = timedelta(hours=-5)  # EST
+        et_offset = timedelta(hours=-5)
         dt_et = dt_utc + et_offset
         return dt_et.strftime('%I:%M %p ET')
     
@@ -61,38 +59,42 @@ class MarketScanner:
         now_utc = self._get_utc_now()
         interval = self.interval_seconds
         
-        # Current slot
         current_slot = (now_utc // interval) * interval
         
-        # Return current and next slot
         return [current_slot, current_slot + interval]
     
     def _calculate_time_remaining(self, market_start_ts: int) -> tuple:
         """
-        Calculate time remaining for trading
+        FIXED: Calculate time remaining accurately
+        
+        Args:
+            market_start_ts: Unix timestamp when market STARTED
         
         Returns: (is_tradeable, seconds_remaining, status_message)
         """
         now = self._get_utc_now()
+        
+        # Market ends after interval_seconds from start
         market_end_ts = market_start_ts + self.interval_seconds
         
-        # Trading ends 60 seconds before market closes
-        trading_end_ts = market_end_ts - 60
+        # Calculate actual remaining time
+        seconds_until_end = market_end_ts - now
         
+        # Market hasn't started yet
         if now < market_start_ts:
             wait_time = market_start_ts - now
             return (False, 0, f"Starts in {wait_time}s")
         
-        if now >= market_end_ts:
+        # Market has ended
+        if seconds_until_end <= 0:
             return (False, 0, "EXPIRED")
         
-        if now >= trading_end_ts:
-            remaining = market_end_ts - now
-            return (False, remaining, f"SNIPING ONLY ({remaining}s)")
+        # Market in final 60 seconds (sniping only)
+        if seconds_until_end <= 60:
+            return (False, seconds_until_end, f"SNIPING ONLY ({seconds_until_end}s)")
         
-        # Active for pair trading
-        remaining = market_end_ts - now
-        return (True, remaining, f"ACTIVE ({remaining}s remaining)")
+        # Market is active for pair trading
+        return (True, seconds_until_end, f"ACTIVE ({seconds_until_end}s remaining)")
     
     def _safe_parse_json(self, data, default=None):
         if data is None:
@@ -129,8 +131,9 @@ class MarketScanner:
             is_tradeable, remaining, status = self._calculate_time_remaining(ts)
             logger.info(f"   {et_time}: {status}")
             
-            if remaining <= 0:
-                continue  # Skip expired markets
+            # Skip completely expired markets
+            if remaining <= 0 and "SNIPING" not in status:
+                continue
             
             # Try to fetch this market
             event = self._fetch_gamma_event(slug)
@@ -151,9 +154,14 @@ class MarketScanner:
             if not market_info:
                 continue
             
-            # VERIFY: Check CLOB returns valid prices
+            # Mark if snipe-only
+            market_info['snipe_only'] = (remaining <= 60 and remaining > 0)
+            market_info['is_tradeable'] = is_tradeable or market_info['snipe_only']
+            
+            # Verify market is tradeable via CLOB
             if self._verify_market_tradeable(market_info):
-                logger.info(f"   🎯 TRADEABLE MARKET FOUND!")
+                mode = "SNIPE-ONLY" if market_info['snipe_only'] else "TRADEABLE"
+                logger.info(f"   🎯 {mode} MARKET FOUND!")
                 return market_info
             else:
                 logger.warning(f"   ⚠️ Market not tradeable (CLOB check failed)")
@@ -179,7 +187,7 @@ class MarketScanner:
                 is_tradeable, remaining, status = self._calculate_time_remaining(ts)
                 logger.info(f"   {et_time}: {status}")
                 
-                if remaining <= 0:
+                if remaining <= 0 and "SNIPING" not in status:
                     continue
                 
                 event = await self._fetch_gamma_event_async(session, slug)
@@ -198,9 +206,12 @@ class MarketScanner:
                 if not market_info:
                     continue
                 
-                # Verify tradeable
+                market_info['snipe_only'] = (remaining <= 60 and remaining > 0)
+                market_info['is_tradeable'] = is_tradeable or market_info['snipe_only']
+                
                 if await self._verify_market_tradeable_async(session, market_info):
-                    logger.info(f"   🎯 TRADEABLE MARKET FOUND!")
+                    mode = "SNIPE-ONLY" if market_info['snipe_only'] else "TRADEABLE"
+                    logger.info(f"   🎯 {mode} MARKET FOUND!")
                     return market_info
         
         logger.warning("⚠️ No active market found")
@@ -246,7 +257,6 @@ class MarketScanner:
             if not yes_token:
                 return False
             
-            # Try /price endpoint
             response = requests.get(
                 f"{self.clob_url}/price",
                 params={'token_id': yes_token, 'side': 'BUY'},
@@ -257,12 +267,10 @@ class MarketScanner:
                 data = response.json()
                 price = float(data.get('price', 0))
                 
-                # Valid price range
                 if 0.01 < price < 0.99:
                     logger.info(f"   CLOB price check: YES=${price:.4f} ✓")
                     return True
             
-            # Try /book endpoint as backup
             response = requests.get(
                 f"{self.clob_url}/book",
                 params={'token_id': yes_token},
@@ -320,19 +328,15 @@ class MarketScanner:
                 logger.warning("Missing clobTokenIds")
                 return None
             
-            # Parse prices
             yes_price = float(outcome_prices[0]) if outcome_prices else 0.5
             no_price = float(outcome_prices[1]) if len(outcome_prices) > 1 else 0.5
             
-            # Token IDs
             yes_token_id = str(clob_token_ids[0])
             no_token_id = str(clob_token_ids[1])
             
-            # Outcome names
             yes_outcome = outcomes[0] if outcomes else 'Up'
             no_outcome = outcomes[1] if len(outcomes) > 1 else 'Down'
             
-            # Swap if first outcome is "Down"
             if 'down' in yes_outcome.lower():
                 yes_outcome, no_outcome = no_outcome, yes_outcome
                 yes_price, no_price = no_price, yes_price
@@ -366,67 +370,29 @@ class MarketScanner:
             return None
 
 
-# ==========================================
-# TEST
-# ==========================================
-
-def test_scanner():
+if __name__ == "__main__":
     print("\n" + "="*70)
-    print("🧪 TESTING MARKET SCANNER V11")
+    print("🧪 TESTING MARKET SCANNER V12")
     print("="*70)
     
     scanner = MarketScanner(asset="BTC", duration=15)
     
     print(f"\n🕐 Current Time: {scanner._get_current_et()}")
-    
     print(f"\n📡 Searching for active market...")
+    
     market = scanner.find_active_market()
     
     if market:
-        print(f"\n" + "="*70)
+        print(f"\n{'='*70}")
         print(f"🎯 MARKET FOUND!")
-        print(f"="*70)
+        print(f"{'='*70}")
         print(f"   Title: {market['question'][:60]}...")
-        print(f"   Slug: {market['slug']}")
         print(f"   Time Remaining: {market.get('time_remaining', 'N/A')}s")
-        print(f"   YES ({market['yes_outcome']}): ${market['yes_price']:.4f}")
-        print(f"   NO ({market['no_outcome']}): ${market['no_price']:.4f}")
+        print(f"   Snipe Only: {market.get('snipe_only', False)}")
+        print(f"   YES: ${market['yes_price']:.4f}")
+        print(f"   NO: ${market['no_price']:.4f}")
         print(f"   Pair Cost: ${market['yes_price'] + market['no_price']:.4f}")
-        print(f"   YES Token: {market['yes_token_id'][:40]}...")
-        print(f"   NO Token: {market['no_token_id'][:40]}...")
-        
-        # Test CLOB orderbook
-        print(f"\n📖 Testing CLOB orderbook...")
-        
-        for name, token_id in [("YES", market['yes_token_id']), ("NO", market['no_token_id'])]:
-            try:
-                response = requests.get(
-                    f"https://clob.polymarket.com/book",
-                    params={'token_id': token_id},
-                    timeout=5
-                )
-                
-                if response.status_code == 200:
-                    book = response.json()
-                    asks = book.get('asks', [])
-                    bids = book.get('bids', [])
-                    
-                    if asks:
-                        best_ask = float(asks[0]['price'])
-                        print(f"   {name} Best ASK: ${best_ask:.4f}")
-                    if bids:
-                        best_bid = float(bids[0]['price'])
-                        print(f"   {name} Best BID: ${best_bid:.4f}")
-                else:
-                    print(f"   {name}: HTTP {response.status_code}")
-                    
-            except Exception as e:
-                print(f"   {name}: Error - {e}")
     else:
         print(f"\n⚠️ No active market found")
     
     print("\n" + "="*70)
-
-
-if __name__ == "__main__":
-    test_scanner()

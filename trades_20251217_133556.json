@@ -1,0 +1,62 @@
+[
+  {
+    "timestamp": 1765953151.892256,
+    "side": "NO",
+    "type": "BUY",
+    "outcome": "Down",
+    "price": 0.38,
+    "size": 1.9736842105263157,
+    "cost": 0.75,
+    "dry_run": true
+  },
+  {
+    "timestamp": 1765953215.201351,
+    "side": "YES",
+    "type": "BUY",
+    "outcome": "Up",
+    "price": 0.53,
+    "size": 1.4150943396226414,
+    "cost": 0.75,
+    "dry_run": true
+  },
+  {
+    "timestamp": 1765953225.069372,
+    "side": "YES",
+    "type": "BUY",
+    "outcome": "Up",
+    "price": 0.52,
+    "size": 1.4423076923076923,
+    "cost": 0.75,
+    "dry_run": true
+  },
+  {
+    "timestamp": 1765953230.710093,
+    "side": "YES",
+    "type": "BUY",
+    "outcome": "Up",
+    "price": 0.52,
+    "size": 1.4423076923076923,
+    "cost": 0.75,
+    "dry_run": true
+  },
+  {
+    "timestamp": 1765953236.340796,
+    "side": "YES",
+    "type": "BUY",
+    "outcome": "Up",
+    "price": 0.55,
+    "size": 1.3636363636363635,
+    "cost": 0.75,
+    "dry_run": true
+  },
+  {
+    "timestamp": 1765953242.986181,
+    "side": "YES",
+    "type": "BUY",
+    "outcome": "Up",
+    "price": 0.48,
+    "size": 1.5625,
+    "cost": 0.75,
+    "dry_run": true
+  }
+]

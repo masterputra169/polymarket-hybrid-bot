@@ -1,0 +1,45 @@
+# ═══════════════════════════════════════════════════════════════
+# POLYMARKET HYBRID TRADING BOT V2 - DEPENDENCIES
+# ═══════════════════════════════════════════════════════════════
+
+# Core Polymarket
+py-clob-client>=0.30.0
+
+# Web3 for allowances (REQUIRED for approve.py)
+web3>=6.14.0
+
+# Async & WebSocket (for last-second sniping and asymmetric strategy)
+asyncio>=3.4.3
+aiohttp>=3.9.0
+websockets>=12.0
+
+# Configuration & Environment
+python-dotenv>=1.0.0
+
+# HTTP Requests
+requests>=2.31.0
+
+# Data Processing (for price history in asymmetric strategy)
+numpy>=1.24.0
+
+# Visualization
+matplotlib>=3.7.0
+
+# Optional: Enhanced logging
+colorama>=0.4.6
+
+# ═══════════════════════════════════════════════════════════════
+# Installation Instructions:
+# ═══════════════════════════════════════════════════════════════
+#
+# Install all dependencies:
+#   pip install -r requirements_v2.txt
+#
+# Or install individually:
+#   pip install py-clob-client web3 aiohttp websockets
+#   pip install python-dotenv requests numpy matplotlib
+#
+# Verify installation:
+#   python -c "import py_clob_client, web3, aiohttp, asyncio; print('✅ All core packages OK')"
+#
+# ═══════════════════════════════════════════════════════════════
